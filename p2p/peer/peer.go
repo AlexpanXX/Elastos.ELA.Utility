@@ -17,7 +17,7 @@ import (
 
 const (
 	// idleTimeout is the duration of inactivity before we time out a peer.
-	idleTimeout = 2 * time.Minute
+	idleTimeout = 24 * time.Second
 
 	// pingInterval is the interval of time to wait in between sending ping
 	// messages.
@@ -26,6 +26,8 @@ const (
 	// negotiateTimeout is the duration of inactivity before we timeout a
 	// peer that hasn't completed the initial version negotiation.
 	negotiateTimeout = 30 * time.Second
+
+	connectIOTimeout = 10 * time.Second
 )
 
 // outMsg is used to house a message to be sent along with a channel to signal
@@ -516,7 +518,18 @@ func (p *Peer) writeMessage(msg p2p.Message) error {
 		return fmt.Sprintf("Sending %v%s to %s", msg.CMD(), summary, p)
 	}))
 
-	return p2p.WriteMessage(p.conn, p.cfg.Magic, msg)
+	errChan := make(chan error)
+	go func() {
+		errChan <- p2p.WriteMessage(p.conn, p.cfg.Magic, msg)
+	}()
+
+	select {
+	case err := <-errChan:
+		return err
+
+	case <-time.After(connectIOTimeout):
+		return fmt.Errorf("Write message to %s timeout", p)
+	}
 }
 
 // shouldHandleIOError returns whether or not the passed error, which is
@@ -719,7 +732,9 @@ func (p *Peer) SendMessage(msg p2p.Message, doneChan chan<- struct{}) {
 		}
 		return
 	}
+	fmt.Printf("sendQueue starts %s\n", p)
 	p.sendQueue <- outMsg{msg: msg, doneChan: doneChan}
+	fmt.Printf("sendQueue finish %s\n", p)
 }
 
 func (p *Peer) OnSendDone(sendDoneChan chan<- struct{}) {
@@ -738,14 +753,19 @@ func (p *Peer) Connected() bool {
 // function when the peer is already disconnected or in the process of
 // disconnecting will have no effect.
 func (p *Peer) Disconnect() {
+	fmt.Printf("Disconnect starts %s\n", p)
 	if atomic.AddInt32(&p.disconnect, 1) != 1 {
+		fmt.Printf("Disconnect step 0 %s\n", p)
 		return
 	}
 
 	if atomic.LoadInt32(&p.connected) != 0 {
+		fmt.Printf("Disconnect step 1 %s\n", p)
 		p.conn.Close()
 	}
+	fmt.Printf("Disconnect step 2 %s\n", p)
 	close(p.quit)
+	fmt.Printf("Disconnect finish %s\n", p)
 }
 
 // InQuit returns the signal chan of message inHandler quit.
@@ -903,7 +923,7 @@ func (p *Peer) start() error {
 	// and output messages.
 	go p.inHandler()
 	go p.outHandler()
-	go p.pingHandler()
+	//go p.pingHandler()
 
 	// Send our verack message now that the IO processing machinery has started.
 	p.SendMessage(&msg.VerAck{}, nil)
